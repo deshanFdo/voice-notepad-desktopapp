@@ -1,0 +1,346 @@
+:root {
+  color-scheme: dark;
+  font-family: "Bahnschrift", "Segoe UI Semibold", "Aptos", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #edf2ff;
+  background:
+    radial-gradient(circle at top left, rgba(101, 168, 255, 0.22), transparent 26%),
+    radial-gradient(circle at right center, rgba(54, 211, 153, 0.18), transparent 28%),
+    linear-gradient(145deg, #08101f 0%, #0d1222 45%, #070b15 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --panel: rgba(10, 15, 28, 0.88);
+  --panel-border: rgba(159, 179, 255, 0.18);
+  --accent: #7dd3fc;
+  --accent-strong: #38bdf8;
+  --muted: #9ca8c7;
+  --text: #eef4ff;
+  --danger: #ff7c8f;
+  --success: #4ade80;
+  --surface: rgba(255, 255, 255, 0.04);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+  overflow: hidden;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(290px, 360px) minmax(0, 1fr);
+  gap: 20px;
+  width: 100%;
+  height: 100%;
+  padding: 20px;
+}
+
+.sidebar,
+.editor-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(22px);
+  border-radius: 28px;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px;
+}
+
+.brand-block {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand-mark {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  color: #07111f;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  background: linear-gradient(145deg, #7dd3fc, #c4b5fd 55%, #f9a8d4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 10px 24px rgba(125, 211, 252, 0.2);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.8rem;
+  line-height: 1.05;
+}
+
+h2 {
+  font-size: 1.1rem;
+  color: #dbeafe;
+}
+
+.status-card,
+.hint-card,
+.metrics-grid > div {
+  background: var(--surface);
+  border: 1px solid rgba(184, 198, 255, 0.12);
+  border-radius: 22px;
+}
+
+.status-card {
+  padding: 16px;
+}
+
+.status-card p {
+  margin-top: 10px;
+  color: #f5f7ff;
+}
+
+.status-card small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.status-idle {
+  color: #c7d2fe;
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.status-recording {
+  color: #d1fae5;
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.status-loading {
+  color: #fef3c7;
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.status-error {
+  color: #ffe4e6;
+  background: rgba(244, 63, 94, 0.18);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metrics-grid > div {
+  min-height: 88px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.metrics-grid strong {
+  font-size: 1.45rem;
+}
+
+.metrics-grid span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.action-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.action-stack button,
+.topbar-right span {
+  border-radius: 16px;
+}
+
+.action-stack button {
+  padding: 13px 14px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(184, 198, 255, 0.16);
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.action-stack button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(125, 211, 252, 0.35);
+  background: rgba(125, 211, 252, 0.12);
+}
+
+.action-stack button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.action-stack .primary {
+  grid-column: span 2;
+  background: linear-gradient(135deg, #22d3ee, #60a5fa 50%, #a78bfa);
+  color: #07111f;
+  font-weight: 800;
+  border-color: transparent;
+}
+
+.hint-card {
+  padding: 16px 18px;
+  margin-top: auto;
+}
+
+.hint-card p {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.hint-card ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #d7def0;
+}
+
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.topbar-right {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.topbar-right span {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(184, 198, 255, 0.12);
+  padding: 8px 10px;
+}
+
+.notepad {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  outline: none;
+  border: 1px solid rgba(184, 198, 255, 0.14);
+  border-radius: 24px;
+  padding: 22px;
+  background: rgba(4, 8, 18, 0.72);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  line-height: 1.7;
+  font-size: 1.02rem;
+  letter-spacing: 0.01em;
+}
+
+.notepad::placeholder {
+  color: #7381a5;
+}
+
+.notepad:focus {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.08);
+}
+
+@media (max-width: 1024px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100%;
+  }
+
+  .editor-panel {
+    min-height: 72vh;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .sidebar,
+  .editor-panel {
+    border-radius: 22px;
+    padding: 16px;
+  }
+
+  .action-stack,
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-stack .primary {
+    grid-column: span 1;
+  }
+
+  .topbar {
+    flex-direction: column;
+  }
+}
