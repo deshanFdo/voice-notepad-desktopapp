@@ -72,6 +72,7 @@ button {
   flex-direction: column;
   gap: 18px;
   padding: 22px;
+  overflow-y: auto;
 }
 
 .brand-block {
@@ -91,6 +92,7 @@ button {
   letter-spacing: 0.08em;
   background: linear-gradient(145deg, #7dd3fc, #c4b5fd 55%, #f9a8d4);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 10px 24px rgba(125, 211, 252, 0.2);
+  flex-shrink: 0;
 }
 
 .eyebrow {
@@ -140,6 +142,8 @@ h2 {
   color: var(--muted);
 }
 
+/* ─── Status pills ──────────────────────────── */
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -150,6 +154,7 @@ h2 {
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+  transition: background 200ms ease, color 200ms ease;
 }
 
 .status-idle {
@@ -160,6 +165,7 @@ h2 {
 .status-recording {
   color: #d1fae5;
   background: rgba(16, 185, 129, 0.18);
+  animation: pulse-glow 1.8s ease-in-out infinite;
 }
 
 .status-loading {
@@ -171,6 +177,44 @@ h2 {
   color: #ffe4e6;
   background: rgba(244, 63, 94, 0.18);
 }
+
+/* ─── Download progress bar ─────────────────── */
+
+.progress-container {
+  margin-top: 12px;
+  position: relative;
+  width: 100%;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(184, 198, 255, 0.1);
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #22d3ee, #60a5fa 50%, #a78bfa);
+  border-radius: 14px;
+  transition: width 300ms ease;
+  box-shadow: 0 0 20px rgba(96, 165, 250, 0.3);
+}
+
+.progress-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* ─── Metrics ───────────────────────────────── */
 
 .metrics-grid {
   display: grid;
@@ -195,6 +239,8 @@ h2 {
   font-size: 0.9rem;
 }
 
+/* ─── Action buttons ────────────────────────── */
+
 .action-stack {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -212,13 +258,17 @@ h2 {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(184, 198, 255, 0.16);
   cursor: pointer;
-  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
 
 .action-stack button:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: rgba(125, 211, 252, 0.35);
   background: rgba(125, 211, 252, 0.12);
+}
+
+.action-stack button:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .action-stack button:disabled {
@@ -232,7 +282,20 @@ h2 {
   color: #07111f;
   font-weight: 800;
   border-color: transparent;
+  font-size: 1.02rem;
 }
+
+.action-stack .primary:hover:not(:disabled) {
+  box-shadow: 0 6px 24px rgba(96, 165, 250, 0.35);
+  transform: translateY(-2px);
+}
+
+.action-stack .primary.recording-active {
+  background: linear-gradient(135deg, #f87171, #fb923c 50%, #fbbf24);
+  animation: pulse-btn 1.8s ease-in-out infinite;
+}
+
+/* ─── Hint card ─────────────────────────────── */
 
 .hint-card {
   padding: 16px 18px;
@@ -249,6 +312,12 @@ h2 {
   padding-left: 18px;
   color: #d7def0;
 }
+
+.hint-card li {
+  margin-bottom: 4px;
+}
+
+/* ─── Editor panel ──────────────────────────── */
 
 .editor-panel {
   display: flex;
@@ -303,6 +372,28 @@ h2 {
   border-color: rgba(56, 189, 248, 0.45);
   box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.08);
 }
+
+/* ─── Animations ────────────────────────────── */
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+  50% {
+    box-shadow: 0 0 12px 4px rgba(16, 185, 129, 0.25);
+  }
+}
+
+@keyframes pulse-btn {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+  }
+  50% {
+    box-shadow: 0 0 18px 6px rgba(248, 113, 113, 0.3);
+  }
+}
+
+/* ─── Responsive ────────────────────────────── */
 
 @media (max-width: 1024px) {
   body {

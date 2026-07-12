@@ -7,6 +7,7 @@ const FILE_STORAGE_KEY = 'voice-notepad:file-path';
 
 type WorkerMessage =
   | { type: 'status'; message: string }
+  | { type: 'progress'; file: string; loaded: number; total: number }
   | { type: 'result'; id: number; text: string }
   | { type: 'error'; id?: number; message: string };
 
@@ -55,9 +56,10 @@ export default function App() {
   const [noteText, setNoteText] = useState('');
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>('idle');
-  const [workerStatus, setWorkerStatus] = useState('Speech worker idle.');
+  const [workerStatus, setWorkerStatus] = useState('Initializing speech engine...');
   const [saveStatus, setSaveStatus] = useState('Draft autosaved locally.');
   const [isModelReady, setIsModelReady] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -68,6 +70,7 @@ export default function App() {
   const recordingStartRef = useRef<number | null>(null);
   const version = useMemo(() => 'Voice Notepad', []);
 
+  // Initialize worker and restore draft
   useEffect(() => {
     const storedDraft = window.localStorage.getItem(DRAFT_STORAGE_KEY);
     const storedFilePath = window.localStorage.getItem(FILE_STORAGE_KEY);
@@ -89,12 +92,24 @@ export default function App() {
 
       if (message.type === 'status') {
         setWorkerStatus(message.message);
-        if (message.message.toLowerCase().includes('ready')) {
+
+        // Model is fully ready when we receive a 'ready' message
+        const lower = message.message.toLowerCase();
+        if (lower.includes('ready')) {
           setIsModelReady(true);
+          setVoiceStatus((prev) => (prev === 'loading' ? 'idle' : prev));
+          setDownloadProgress(null);
         }
-        if (message.message.toLowerCase().includes('loading') || message.message.toLowerCase().includes('downloading')) {
-          setVoiceStatus('loading');
+
+        // Model is downloading/loading
+        if (lower.includes('downloading') || lower.includes('loading')) {
+          setVoiceStatus((prev) => (prev === 'recording' ? prev : 'loading'));
         }
+        return;
+      }
+
+      if (message.type === 'progress') {
+        setDownloadProgress({ loaded: message.loaded, total: message.total });
         return;
       }
 
@@ -126,6 +141,7 @@ export default function App() {
     };
   }, []);
 
+  // Autosave draft
   useEffect(() => {
     const handle = window.setTimeout(() => {
       window.localStorage.setItem(DRAFT_STORAGE_KEY, noteText);
@@ -139,6 +155,7 @@ export default function App() {
     return () => window.clearTimeout(handle);
   }, [noteText, currentFilePath]);
 
+  // Recording timer
   useEffect(() => {
     if (voiceStatus !== 'recording' || !recordingStartRef.current) {
       setRecordingSeconds(0);
@@ -222,7 +239,7 @@ export default function App() {
       recordingStartRef.current = Date.now();
       setRecordingSeconds(0);
       setVoiceStatus('recording');
-      setWorkerStatus(isModelReady ? 'Recording and transcribing.' : 'Recording while the model loads.');
+      setWorkerStatus(isModelReady ? 'Listening... speak naturally.' : 'Recording — model still loading, will transcribe soon.');
 
       recorder.ondataavailable = (event) => {
         if (!event.data || event.data.size === 0) {
@@ -245,7 +262,7 @@ export default function App() {
               const message = messageEvent.data;
               if (message.type === 'result' && message.id === chunkId) {
                 worker.removeEventListener('message', onMessage as EventListener);
-                setWorkerStatus(message.text ? 'Transcript added.' : 'Silence detected; keeping microphone open.');
+                setWorkerStatus(message.text ? 'Transcript added.' : 'Silence detected — keep speaking.');
                 resolve();
               }
 
@@ -265,7 +282,7 @@ export default function App() {
                 samples: new Float32Array(transferable),
                 sampleRate,
               },
-              [transferable]
+              [transferable],
             );
           });
         });
@@ -277,7 +294,7 @@ export default function App() {
         streamRef.current = null;
         recordingStartRef.current = null;
         setVoiceStatus('idle');
-        setWorkerStatus('Speech worker idle.');
+        setWorkerStatus(isModelReady ? 'Ready — click to dictate again.' : 'Speech worker idle.');
         setRecordingSeconds(0);
       };
 
@@ -312,7 +329,31 @@ export default function App() {
 
   const characterCount = noteText.length;
   const wordCount = noteText.trim() ? noteText.trim().split(/\s+/).length : 0;
-  const statusLabel = voiceStatus === 'recording' ? 'Listening' : voiceStatus === 'loading' ? 'Downloading model' : voiceStatus === 'error' ? 'Attention needed' : 'Ready';
+
+  const statusLabel =
+    voiceStatus === 'recording'
+      ? '● Listening'
+      : voiceStatus === 'loading'
+        ? 'Downloading'
+        : voiceStatus === 'error'
+          ? 'Error'
+          : isModelReady
+            ? '✓ Ready'
+            : 'Initializing';
+
+  const progressPercent =
+    downloadProgress && downloadProgress.total > 0
+      ? Math.min(100, Math.round((downloadProgress.loaded / downloadProgress.total) * 100))
+      : null;
+
+  const dictationButtonLabel =
+    voiceStatus === 'recording'
+      ? '■  Stop Dictation'
+      : isModelReady
+        ? '🎙  Start Dictation'
+        : voiceStatus === 'loading'
+          ? '⏳  Downloading Model...'
+          : '🎙  Start Dictation';
 
   return (
     <div className="app-shell">
@@ -328,7 +369,20 @@ export default function App() {
         <div className="status-card">
           <span className={`status-pill status-${voiceStatus}`}>{statusLabel}</span>
           <p>{workerStatus}</p>
-          <small>The speech model is free, local, and cached after the first download.</small>
+
+          {/* Download progress bar */}
+          {progressPercent !== null && voiceStatus === 'loading' && (
+            <div className="progress-container">
+              <div className="progress-bar" style={{ width: `${progressPercent}%` }} />
+              <span className="progress-label">{progressPercent}%</span>
+            </div>
+          )}
+
+          <small>
+            {isModelReady
+              ? 'AI model cached locally — works offline.'
+              : 'Free AI model downloads on first use (~40 MB, one-time).'}
+          </small>
         </div>
 
         <div className="metrics-grid">
@@ -351,21 +405,26 @@ export default function App() {
         </div>
 
         <div className="action-stack">
-          <button className="primary" onClick={toggleVoice} disabled={voiceStatus === 'loading'}>
-            {voiceStatus === 'recording' ? 'Stop Dictation' : 'Start Dictation'}
+          <button
+            className={`primary ${voiceStatus === 'recording' ? 'recording-active' : ''}`}
+            onClick={toggleVoice}
+            disabled={voiceStatus === 'loading'}
+          >
+            {dictationButtonLabel}
           </button>
-          <button onClick={handleOpen}>Open</button>
-          <button onClick={() => void handleSave(false)}>Save</button>
-          <button onClick={() => void handleSave(true)}>Save As</button>
-          <button onClick={clearNote}>Clear</button>
+          <button onClick={handleOpen}>📂  Open</button>
+          <button onClick={() => void handleSave(false)}>💾  Save</button>
+          <button onClick={() => void handleSave(true)}>📄  Save As</button>
+          <button onClick={clearNote}>🗑  Clear</button>
         </div>
 
         <div className="hint-card">
-          <p>Shortcut flow</p>
+          <p>How it works</p>
           <ul>
-            <li>Type normally or use the microphone button.</li>
-            <li>Voice text is appended automatically in chunks.</li>
-            <li>Native spellcheck underlines typed misspellings.</li>
+            <li>Type normally or click the microphone button.</li>
+            <li>Speech is transcribed locally by a free AI model.</li>
+            <li>No internet needed after the first model download.</li>
+            <li>Native spellcheck underlines misspellings.</li>
           </ul>
         </div>
       </aside>
@@ -373,7 +432,7 @@ export default function App() {
       <main className="editor-panel">
         <header className="topbar">
           <div>
-            <span className="eyebrow">Local first / offline capable after model download</span>
+            <span className="eyebrow">Local first · offline capable · free AI</span>
             <h2>{formatFileLabel(currentFilePath)}</h2>
           </div>
           <div className="topbar-right">
