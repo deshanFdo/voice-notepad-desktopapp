@@ -14,6 +14,10 @@ type OpenResult = {
 };
 
 const isMac = process.platform === 'darwin';
+
+// Enable WebGPU access on local origins/all GPUs
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
+
 let mainWindow: BrowserWindow | null = null;
 
 function getRendererPath() {
@@ -93,6 +97,10 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+  });
+
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[Renderer Console] [Level ${level}] ${message} (at ${sourceId}:${line})`);
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

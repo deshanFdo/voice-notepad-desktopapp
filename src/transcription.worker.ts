@@ -7,6 +7,11 @@ type TranscribeRequest = {
   sampleRate: number;
 };
 
+type LoadRequest = {
+  type: 'load';
+  modelId: string;
+};
+
 type StatusMessage = {
   type: 'status';
   message: string;
@@ -31,15 +36,12 @@ type ErrorMessage = {
   message: string;
 };
 
-/* Free, open-source Whisper Tiny English model from Hugging Face.
-   ~40 MB one-time download, cached in the browser/Electron cache forever.
-   No API keys, no cloud, no cost. Runs 100% locally via ONNX WebAssembly. */
-const SPEECH_MODEL_ID = 'Xenova/whisper-tiny.en';
-
+const DEFAULT_MODEL_ID = 'onnx-community/whisper-tiny.en';
 const TARGET_SAMPLE_RATE = 16000; // Whisper expects 16 kHz audio
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let transcriberPromise: Promise<any> | null = null;
+let currentModelId = '';
 
 function postStatus(message: string) {
   self.postMessage({ type: 'status', message } satisfies StatusMessage);
@@ -77,17 +79,35 @@ function resampleTo16kHz(samples: Float32Array, fromRate: number): Float32Array 
   return result;
 }
 
-async function getTranscriber() {
-  if (!transcriberPromise) {
-    // Configure for remote model download — no API key needed
-    env.allowRemoteModels = true;
-    env.allowLocalModels = false;
+async function getTranscriber(modelId: string) {
+  const activeModelId = modelId || DEFAULT_MODEL_ID;
 
-    postStatus('Downloading free AI model (first time only)...');
+  if (!transcriberPromise || currentModelId !== activeModelId) {
+    transcriberPromise = null;
+    currentModelId = activeModelId;
+
+    // Resolve the path to the directory containing local WASM files (dist/renderer/)
+    const workerUrl = self.location.href;
+    let wasmPath = './';
+    if (workerUrl.includes('/assets/')) {
+      // Production build: WASM files are copied to dist/renderer/ via public/
+      wasmPath = workerUrl.substring(0, workerUrl.lastIndexOf('/assets/') + 1);
+    }
+    
+    console.log('[Worker] Resolving WASM path to:', wasmPath);
+    env.backends.onnx.wasm.wasmPaths = wasmPath;
+    env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(4, navigator.hardwareConcurrency || 2));
+    
+    // Enable caching for offline support
+    env.useBrowserCache = true;
+    env.allowRemoteModels = true;
+    env.allowLocalModels = true;
+
+    postStatus(`Loading ${activeModelId.split('/').pop()} model...`);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const options: any = {
-      quantized: true,
+      dtype: 'q8', // 8-bit quantized is compatible and fast
       progress_callback: (progress: { status: string; file?: string; loaded?: number; total?: number; name?: string }) => {
         if (progress.status === 'progress' && progress.file && progress.loaded != null && progress.total != null && progress.total > 0) {
           postProgress(progress.file, progress.loaded, progress.total);
@@ -101,31 +121,93 @@ async function getTranscriber() {
       },
     };
 
-    transcriberPromise = pipeline('automatic-speech-recognition', SPEECH_MODEL_ID, options);
+    const tryLoad = async (device: 'webgpu' | 'wasm', localOnly: boolean) => {
+      const runOptions = {
+        ...options,
+        device,
+      };
+      if (localOnly) {
+        (runOptions as any).local_files_only = true;
+      }
+      return pipeline('automatic-speech-recognition', activeModelId, runOptions as any);
+    };
 
+    // 1. Try local WebGPU load (cached)
     try {
-      await transcriberPromise;
-      postStatus('Model ready.');
-    } catch (err) {
-      transcriberPromise = null;
-      const message = err instanceof Error ? err.message : 'Failed to load speech model.';
-      self.postMessage({ type: 'error', message: `Model load failed: ${message}` } satisfies ErrorMessage);
-      throw err;
+      console.log(`[Worker] Trying local WebGPU load for ${activeModelId}...`);
+      transcriberPromise = await tryLoad('webgpu', true);
+      postStatus('Model ready (GPU).');
+      console.log('[Worker] WebGPU model loaded from cache.');
+      return transcriberPromise;
+    } catch (gpuCacheErr) {
+      console.warn('[Worker] Local WebGPU load failed, trying local WASM load...', gpuCacheErr);
+      
+      // 2. Try local WASM load (cached)
+      try {
+        transcriberPromise = await tryLoad('wasm', true);
+        postStatus('Model ready (CPU).');
+        console.log('[Worker] WASM model loaded from cache.');
+        return transcriberPromise;
+      } catch (wasmCacheErr) {
+        console.warn('[Worker] Local WASM load failed, checking online network connection...', wasmCacheErr);
+        
+        // If offline and cache load failed, throw error
+        if (!navigator.onLine) {
+          transcriberPromise = null;
+          const errorMsg = 'Model is not cached locally, and you are offline. Please connect to the internet to download the speech model.';
+          postStatus(errorMsg);
+          throw new Error(errorMsg);
+        }
+
+        // 3. Online download attempt via WebGPU
+        postStatus(`Downloading free AI model (first time only)...`);
+        try {
+          console.log('[Worker] Trying to download model for WebGPU...');
+          transcriberPromise = await tryLoad('webgpu', false);
+          postStatus('Model ready (GPU).');
+          console.log('[Worker] Model downloaded and loaded via WebGPU.');
+        } catch (gpuDownloadErr) {
+          console.warn('[Worker] WebGPU download/load failed, falling back to WASM download...', gpuDownloadErr);
+          
+          // 4. Fallback online download attempt via WASM
+          try {
+            transcriberPromise = await tryLoad('wasm', false);
+            postStatus('Model ready (CPU).');
+            console.log('[Worker] Model downloaded and loaded via WASM.');
+          } catch (wasmDownloadErr) {
+            transcriberPromise = null;
+            const message = wasmDownloadErr instanceof Error ? wasmDownloadErr.message : 'Download failed.';
+            const errorMsg = `Failed to download model: ${message}`;
+            postStatus(errorMsg);
+            throw new Error(errorMsg);
+          }
+        }
+      }
     }
   }
 
   return transcriberPromise;
 }
 
-self.onmessage = async (event: MessageEvent<TranscribeRequest>) => {
+self.onmessage = async (event: MessageEvent<TranscribeRequest | LoadRequest>) => {
   const data = event.data;
+
+  if (data.type === 'load') {
+    try {
+      await getTranscriber(data.modelId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Model load failed.';
+      self.postMessage({ type: 'error', message: `Model load error: ${message}` } satisfies ErrorMessage);
+    }
+    return;
+  }
 
   if (data.type !== 'transcribe') {
     return;
   }
 
   try {
-    const transcriber = await getTranscriber();
+    const transcriber = await getTranscriber(currentModelId);
 
     // Resample to 16 kHz — Whisper's expected sample rate
     const audio16k = resampleTo16kHz(data.samples, data.sampleRate);
@@ -137,12 +219,30 @@ self.onmessage = async (event: MessageEvent<TranscribeRequest>) => {
       return_timestamps: false,
     });
 
-    const text = typeof result?.text === 'string' ? result.text.trim() : '';
+    let text = typeof result?.text === 'string' ? result.text.trim() : '';
+
+    // Clean blank audio and other tags
+    text = text
+      .replace(/\[blank_audio\]/gi, '')
+      .replace(/\(blank_audio\)/gi, '')
+      .replace(/\[music\]/gi, '')
+      .replace(/\[laughter\]/gi, '')
+      .replace(/\[applause\]/gi, '')
+      .replace(/\[noise\]/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // If text only contains punctuation after filtering, clear it
+    if (/^[.,?!\s]+$/.test(text)) {
+      text = '';
+    }
+
     self.postMessage({ type: 'result', id: data.id, text } satisfies ResultMessage);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Speech transcription failed.';
+    console.error('[Worker] Transcription error:', message);
     self.postMessage({ type: 'error', id: data.id, message: `Transcription error: ${message}` } satisfies ErrorMessage);
   }
 };
 
-postStatus('Speech worker initialized. Model will download on first use.');
+postStatus('Speech worker initialized. Model will load or download on first use.');

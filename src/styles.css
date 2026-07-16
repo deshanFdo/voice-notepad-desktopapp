@@ -120,11 +120,54 @@ h2 {
 }
 
 .status-card,
+.device-card,
 .hint-card,
 .metrics-grid > div {
   background: var(--surface);
   border: 1px solid rgba(184, 198, 255, 0.12);
   border-radius: 22px;
+}
+
+.status-card,
+.device-card {
+  padding: 16px;
+}
+
+.device-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-card label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.device-select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(4, 8, 18, 0.72);
+  border: 1px solid rgba(184, 198, 255, 0.14);
+  color: var(--text);
+  outline: none;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.device-select:focus {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.08);
+}
+
+.device-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .status-card {

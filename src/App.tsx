@@ -4,6 +4,13 @@ type VoiceStatus = 'idle' | 'recording' | 'loading' | 'error';
 
 const DRAFT_STORAGE_KEY = 'voice-notepad:draft';
 const FILE_STORAGE_KEY = 'voice-notepad:file-path';
+const MODEL_STORAGE_KEY = 'voice-notepad:model-id';
+
+const MODELS = [
+  { id: 'onnx-community/whisper-tiny.en', name: 'Tiny (Fastest, ~40MB)' },
+  { id: 'onnx-community/whisper-base.en', name: 'Base (Recommended, ~77MB)' },
+  { id: 'onnx-community/whisper-small.en', name: 'Small (Accurate, ~240MB)' },
+];
 
 type WorkerMessage =
   | { type: 'status'; message: string }
@@ -61,16 +68,68 @@ export default function App() {
   const [isModelReady, setIsModelReady] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [selectedModelId, setSelectedModelId] = useState<string>(() => {
+    return window.localStorage.getItem(MODEL_STORAGE_KEY) || MODELS[1].id; // Default to Base model (MODELS[1])!
+  });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const chunkCounterRef = useRef(0);
   const processingQueueRef = useRef(Promise.resolve());
   const recordingStartRef = useRef<number | null>(null);
   const version = useMemo(() => 'Voice Notepad', []);
+  const hasFailedRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioSamplesAccumulator = useRef<number[]>([]);
+  const intervalIdRef = useRef<number | null>(null);
 
-  // Initialize worker and restore draft
+  async function updateDevices() {
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) {
+        return;
+      }
+      const devicesList = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devicesList.filter((d) => d.kind === 'audioinput');
+      setDevices(audioInputs);
+      
+      if (audioInputs.length > 0) {
+        setSelectedDeviceId((current) => {
+          const exists = audioInputs.some((d) => d.deviceId === current);
+          return exists ? current : audioInputs[0].deviceId;
+        });
+      }
+    } catch (err) {
+      console.error('Error enumerating audio devices:', err);
+    }
+  }
+
+  // Handle device permissions and listing on mount
+  useEffect(() => {
+    if (!navigator.mediaDevices) {
+      return;
+    }
+
+    void updateDevices();
+
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        stream.getTracks().forEach((track) => track.stop());
+        void updateDevices();
+      })
+      .catch((err) => {
+        console.warn('Microphone permission not yet granted:', err);
+      });
+
+    navigator.mediaDevices.addEventListener('devicechange', updateDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', updateDevices);
+    };
+  }, []);
+
+  // Initialize worker and load model when selectedModelId changes
   useEffect(() => {
     const storedDraft = window.localStorage.getItem(DRAFT_STORAGE_KEY);
     const storedFilePath = window.localStorage.getItem(FILE_STORAGE_KEY);
@@ -83,6 +142,10 @@ export default function App() {
       setCurrentFilePath(storedFilePath);
     }
 
+    setIsModelReady(false);
+    setDownloadProgress(null);
+    setWorkerStatus('Initializing speech engine...');
+
     const worker = new Worker(new URL('./transcription.worker.ts', import.meta.url), {
       type: 'module',
     });
@@ -93,7 +156,6 @@ export default function App() {
       if (message.type === 'status') {
         setWorkerStatus(message.message);
 
-        // Model is fully ready when we receive a 'ready' message
         const lower = message.message.toLowerCase();
         if (lower.includes('ready')) {
           setIsModelReady(true);
@@ -101,7 +163,6 @@ export default function App() {
           setDownloadProgress(null);
         }
 
-        // Model is downloading/loading
         if (lower.includes('downloading') || lower.includes('loading')) {
           setVoiceStatus((prev) => (prev === 'recording' ? prev : 'loading'));
         }
@@ -122,24 +183,33 @@ export default function App() {
       }
 
       if (message.type === 'error') {
+        console.error('[App] Worker reported error:', message.message);
+        hasFailedRef.current = true;
         setVoiceStatus('error');
         setWorkerStatus(message.message);
         setSaveStatus(message.message);
+        stopRecording();
       }
     };
 
     worker.onerror = (event) => {
+      console.error('[App] Worker script execution error:', event);
+      hasFailedRef.current = true;
       setVoiceStatus('error');
       setWorkerStatus(event.message || 'Speech worker failed.');
+      stopRecording();
     };
 
     workerRef.current = worker;
+
+    // Command the worker to load the active model
+    worker.postMessage({ type: 'load', modelId: selectedModelId });
 
     return () => {
       worker.terminate();
       workerRef.current = null;
     };
-  }, []);
+  }, [selectedModelId]);
 
   // Autosave draft
   useEffect(() => {
@@ -217,59 +287,112 @@ export default function App() {
       return;
     }
 
+    hasFailedRef.current = false;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err) {
+        console.warn('Failed to get selected audio input, falling back to default mic:', err);
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      }
 
-      const preferredMimeType = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4',
-      ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || '';
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioContext = new AudioContextClass({ sampleRate: 16000 });
+      audioContextRef.current = audioContext;
 
-      const recorder = new MediaRecorder(stream, preferredMimeType ? { mimeType: preferredMimeType } : undefined);
-      mediaRecorderRef.current = recorder;
-      streamRef.current = stream;
+      await audioContext.resume();
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        audioSamplesAccumulator.current.push(...inputData);
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
       chunkCounterRef.current = 0;
+      audioSamplesAccumulator.current = [];
       recordingStartRef.current = Date.now();
       setRecordingSeconds(0);
       setVoiceStatus('recording');
       setWorkerStatus(isModelReady ? 'Listening... speak naturally.' : 'Recording — model still loading, will transcribe soon.');
 
-      recorder.ondataavailable = (event) => {
-        if (!event.data || event.data.size === 0) {
+      const intervalId = window.setInterval(() => {
+        const samples = audioSamplesAccumulator.current;
+        if (samples.length === 0) {
           return;
         }
 
+        audioSamplesAccumulator.current = [];
+        const floatSamples = new Float32Array(samples);
+
+        let maxVal = 0;
+        for (let i = 0; i < floatSamples.length; i++) {
+          const abs = Math.abs(floatSamples[i]);
+          if (abs > maxVal) {
+            maxVal = abs;
+          }
+        }
+
         const chunkId = ++chunkCounterRef.current;
+
+        if (maxVal < 0.01) {
+          if (!hasFailedRef.current) {
+            setWorkerStatus('Silence detected — keep speaking.');
+          }
+          return;
+        }
+
         processingQueueRef.current = processingQueueRef.current.then(async () => {
+          if (hasFailedRef.current) {
+            return;
+          }
           const worker = workerRef.current;
           if (!worker) {
             return;
           }
 
           setWorkerStatus(`Processing phrase ${chunkId}...`);
-          const { samples, sampleRate } = await decodeAudioBlob(event.data);
-          const transferable = samples.slice().buffer;
+
+          const transferable = floatSamples.buffer;
 
           await new Promise<void>((resolve) => {
             const onMessage = (messageEvent: MessageEvent<WorkerMessage>) => {
               const message = messageEvent.data;
               if (message.type === 'result' && message.id === chunkId) {
                 worker.removeEventListener('message', onMessage as EventListener);
-                setWorkerStatus(message.text ? 'Transcript added.' : 'Silence detected — keep speaking.');
+                if (!hasFailedRef.current) {
+                  setWorkerStatus(message.text ? 'Transcript added.' : 'Silence detected — keep speaking.');
+                }
                 resolve();
               }
 
               if (message.type === 'error' && message.id === chunkId) {
+                console.error('[App] Transcription error for chunk', chunkId, ':', message.message);
                 worker.removeEventListener('message', onMessage as EventListener);
+                hasFailedRef.current = true;
                 setVoiceStatus('error');
                 setWorkerStatus(message.message);
+                stopRecording();
                 resolve();
               }
             };
@@ -280,27 +403,18 @@ export default function App() {
                 type: 'transcribe',
                 id: chunkId,
                 samples: new Float32Array(transferable),
-                sampleRate,
+                sampleRate: 16000,
               },
               [transferable],
             );
           });
         });
-      };
+      }, 2500);
 
-      recorder.onstop = () => {
-        stream.getTracks().forEach((track) => track.stop());
-        mediaRecorderRef.current = null;
-        streamRef.current = null;
-        recordingStartRef.current = null;
-        setVoiceStatus('idle');
-        setWorkerStatus(isModelReady ? 'Ready — click to dictate again.' : 'Speech worker idle.');
-        setRecordingSeconds(0);
-      };
-
-      recorder.start(2500);
+      intervalIdRef.current = intervalId;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to access microphone.';
+      hasFailedRef.current = true;
       setVoiceStatus('error');
       setWorkerStatus(message);
       setSaveStatus(message);
@@ -308,13 +422,32 @@ export default function App() {
   }
 
   function stopRecording() {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder) {
-      return;
+    if (intervalIdRef.current) {
+      window.clearInterval(intervalIdRef.current);
+      intervalIdRef.current = null;
     }
 
-    if (recorder.state !== 'inactive') {
-      recorder.stop();
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    recordingStartRef.current = null;
+    setRecordingSeconds(0);
+
+    if (!hasFailedRef.current) {
+      setVoiceStatus('idle');
+      setWorkerStatus(isModelReady ? 'Ready — click to dictate again.' : 'Speech worker idle.');
     }
   }
 
@@ -383,6 +516,47 @@ export default function App() {
               ? 'AI model cached locally — works offline.'
               : 'Free AI model downloads on first use (~40 MB, one-time).'}
           </small>
+        </div>
+
+        <div className="device-card">
+          <label htmlFor="mic-select">🎙️ Audio Input Device</label>
+          <select
+            id="mic-select"
+            className="device-select"
+            value={selectedDeviceId}
+            onChange={(e) => setSelectedDeviceId(e.target.value)}
+            disabled={voiceStatus === 'recording'}
+          >
+            {devices.length === 0 ? (
+              <option value="">No microphones found</option>
+            ) : (
+              devices.map((device) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label || `Microphone ${device.deviceId.substring(0, 5)}`}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
+
+        <div className="device-card">
+          <label htmlFor="model-select">🤖 Speech Recognition Model</label>
+          <select
+            id="model-select"
+            className="device-select"
+            value={selectedModelId}
+            onChange={(e) => {
+              setSelectedModelId(e.target.value);
+              window.localStorage.setItem(MODEL_STORAGE_KEY, e.target.value);
+            }}
+            disabled={voiceStatus === 'recording'}
+          >
+            {MODELS.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="metrics-grid">
