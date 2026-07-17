@@ -1,15 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 type VoiceStatus = 'idle' | 'recording' | 'loading' | 'error';
+type Engine = 'fast' | 'offline';
 
 const DRAFT_STORAGE_KEY = 'voice-notepad:draft';
 const FILE_STORAGE_KEY = 'voice-notepad:file-path';
 const MODEL_STORAGE_KEY = 'voice-notepad:model-id';
+const ENGINE_STORAGE_KEY = 'voice-notepad:engine';
 
 const MODELS = [
   { id: 'onnx-community/whisper-tiny.en', name: 'Tiny (Fastest, ~40MB)' },
-  { id: 'onnx-community/whisper-base.en', name: 'Base (Recommended, ~77MB)' },
+  { id: 'onnx-community/whisper-base.en', name: 'Base (Balanced, ~77MB)' },
   { id: 'onnx-community/whisper-small.en', name: 'Small (Accurate, ~240MB)' },
+];
+
+const ENGINES: { id: Engine; name: string; description: string }[] = [
+  { id: 'fast', name: '🌐 Online Mode (Instant)', description: 'Real-time transcription — words appear instantly as you speak. Requires internet.' },
+  { id: 'offline', name: '✈️ Offline Mode (Local AI)', description: 'Free local AI model. No internet needed. Slower but fully private.' },
 ];
 
 type WorkerMessage =
@@ -41,29 +48,19 @@ function joinTranscript(current: string, nextText: string) {
   return `${current}${separator}${trimmed}`;
 }
 
-async function decodeAudioBlob(blob: Blob) {
-  const arrayBuffer = await blob.arrayBuffer();
-  const audioContext = new AudioContext();
-  try {
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-    const channelData = audioBuffer.getChannelData(0);
-    const mono = new Float32Array(channelData.length);
-    mono.set(channelData);
-    return {
-      samples: mono,
-      sampleRate: audioBuffer.sampleRate,
-      duration: audioBuffer.duration,
-    };
-  } finally {
-    void audioContext.close();
-  }
+// Check if Web Speech API is available
+function isSpeechRecognitionSupported(): boolean {
+  return !!(
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition
+  );
 }
 
 export default function App() {
   const [noteText, setNoteText] = useState('');
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>('idle');
-  const [workerStatus, setWorkerStatus] = useState('Initializing speech engine...');
+  const [workerStatus, setWorkerStatus] = useState('Ready.');
   const [saveStatus, setSaveStatus] = useState('Draft autosaved locally.');
   const [isModelReady, setIsModelReady] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ loaded: number; total: number } | null>(null);
@@ -71,8 +68,15 @@ export default function App() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [selectedModelId, setSelectedModelId] = useState<string>(() => {
-    return window.localStorage.getItem(MODEL_STORAGE_KEY) || MODELS[1].id; // Default to Base model (MODELS[1])!
+    return window.localStorage.getItem(MODEL_STORAGE_KEY) || MODELS[0].id;
   });
+  const [selectedEngine, setSelectedEngine] = useState<Engine>(() => {
+    const stored = window.localStorage.getItem(ENGINE_STORAGE_KEY) as Engine | null;
+    if (stored === 'fast' || stored === 'offline') return stored;
+    // Default to fast if Web Speech API is available, otherwise offline
+    return isSpeechRecognitionSupported() ? 'fast' : 'offline';
+  });
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -86,6 +90,9 @@ export default function App() {
   const audioSamplesAccumulator = useRef<number[]>([]);
   const intervalIdRef = useRef<number | null>(null);
 
+  // Web Speech API ref
+  const recognitionRef = useRef<any>(null);
+
   async function updateDevices() {
     try {
       if (!navigator.mediaDevices?.enumerateDevices) {
@@ -94,7 +101,7 @@ export default function App() {
       const devicesList = await navigator.mediaDevices.enumerateDevices();
       const audioInputs = devicesList.filter((d) => d.kind === 'audioinput');
       setDevices(audioInputs);
-      
+
       if (audioInputs.length > 0) {
         setSelectedDeviceId((current) => {
           const exists = audioInputs.some((d) => d.deviceId === current);
@@ -114,7 +121,8 @@ export default function App() {
 
     void updateDevices();
 
-    navigator.mediaDevices.getUserMedia({ audio: true })
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
       .then((stream) => {
         stream.getTracks().forEach((track) => track.stop());
         void updateDevices();
@@ -129,7 +137,7 @@ export default function App() {
     };
   }, []);
 
-  // Initialize worker and load model when selectedModelId changes
+  // Initialize worker for offline engine when selectedModelId changes
   useEffect(() => {
     const storedDraft = window.localStorage.getItem(DRAFT_STORAGE_KEY);
     const storedFilePath = window.localStorage.getItem(FILE_STORAGE_KEY);
@@ -142,9 +150,16 @@ export default function App() {
       setCurrentFilePath(storedFilePath);
     }
 
+    // Only spawn worker if offline engine is selected
+    if (selectedEngine !== 'offline') {
+      setIsModelReady(false);
+      setWorkerStatus('Ready — using real-time speech engine.');
+      return;
+    }
+
     setIsModelReady(false);
     setDownloadProgress(null);
-    setWorkerStatus('Initializing speech engine...');
+    setWorkerStatus('Initializing offline AI engine...');
 
     const worker = new Worker(new URL('./transcription.worker.ts', import.meta.url), {
       type: 'module',
@@ -188,7 +203,7 @@ export default function App() {
         setVoiceStatus('error');
         setWorkerStatus(message.message);
         setSaveStatus(message.message);
-        stopRecording();
+        stopOfflineRecording();
       }
     };
 
@@ -197,7 +212,7 @@ export default function App() {
       hasFailedRef.current = true;
       setVoiceStatus('error');
       setWorkerStatus(event.message || 'Speech worker failed.');
-      stopRecording();
+      stopOfflineRecording();
     };
 
     workerRef.current = worker;
@@ -209,7 +224,7 @@ export default function App() {
       worker.terminate();
       workerRef.current = null;
     };
-  }, [selectedModelId]);
+  }, [selectedModelId, selectedEngine]);
 
   // Autosave draft
   useEffect(() => {
@@ -276,7 +291,127 @@ export default function App() {
     textareaRef.current?.focus();
   }
 
-  async function startRecording() {
+  // ─────────────────────────────────────────────────────────────────
+  // FAST ENGINE: Web Speech API (real-time, streaming)
+  // ─────────────────────────────────────────────────────────────────
+
+  function startFastRecording() {
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setWorkerStatus('Web Speech API is not available. Switch to Offline AI engine.');
+      setVoiceStatus('error');
+      hasFailedRef.current = true;
+      return;
+    }
+
+    hasFailedRef.current = false;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    // Track the last final result index so we don't re-process results
+    let lastFinalIndex = 0;
+
+    recognition.onresult = (event: any) => {
+      let finalText = '';
+
+      for (let i = lastFinalIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalText += event.results[i][0].transcript;
+          lastFinalIndex = i + 1;
+        }
+      }
+
+      if (finalText.trim()) {
+        setNoteText((current) => joinTranscript(current, finalText));
+        setSaveStatus('Transcript inserted.');
+        setWorkerStatus('Listening... speak naturally.');
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error('[Fast Engine] SpeechRecognition error:', event.error);
+
+      // "aborted" fires when we stop - not a real error
+      if (event.error === 'aborted') {
+        return;
+      }
+
+      if (event.error === 'not-allowed') {
+        setWorkerStatus('Microphone permission denied. Allow microphone access and try again.');
+        setVoiceStatus('error');
+        hasFailedRef.current = true;
+      } else if (event.error === 'network') {
+        setWorkerStatus('Network error. Check internet connection, or switch to Offline AI engine.');
+        setVoiceStatus('error');
+        hasFailedRef.current = true;
+      } else if (event.error === 'no-speech') {
+        // Chrome fires this after silence; just keep listening
+        setWorkerStatus('No speech detected — keep speaking.');
+      } else {
+        setWorkerStatus(`Speech error: ${event.error}. Try switching to Offline AI engine.`);
+        setVoiceStatus('error');
+        hasFailedRef.current = true;
+      }
+    };
+
+    recognition.onend = () => {
+      // Chrome/Electron stops recognition after silence or network glitch.
+      // Auto-restart if we're still supposed to be recording.
+      if (!hasFailedRef.current && voiceStatus === 'recording') {
+        try {
+          recognition.start();
+        } catch {
+          // Already started or other issue, ignore
+        }
+      }
+    };
+
+    recognitionRef.current = recognition;
+    recordingStartRef.current = Date.now();
+    setRecordingSeconds(0);
+    setVoiceStatus('recording');
+    setWorkerStatus('Listening... speak naturally.');
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error('[Fast Engine] Failed to start:', err);
+      setWorkerStatus('Failed to start speech recognition. Try Offline AI engine.');
+      setVoiceStatus('error');
+      hasFailedRef.current = true;
+    }
+  }
+
+  function stopFastRecording() {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      recognitionRef.current = null;
+    }
+
+    recordingStartRef.current = null;
+    setRecordingSeconds(0);
+
+    if (!hasFailedRef.current) {
+      setVoiceStatus('idle');
+      setWorkerStatus('Ready — click to dictate again.');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // OFFLINE ENGINE: Whisper AI via Web Worker
+  // ─────────────────────────────────────────────────────────────────
+
+  async function startOfflineRecording() {
     if (voiceStatus === 'recording') {
       return;
     }
@@ -311,6 +446,8 @@ export default function App() {
         });
       }
 
+      streamRef.current = stream;
+
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioContext = new AudioContextClass({ sampleRate: 16000 });
       audioContextRef.current = audioContext;
@@ -334,7 +471,9 @@ export default function App() {
       recordingStartRef.current = Date.now();
       setRecordingSeconds(0);
       setVoiceStatus('recording');
-      setWorkerStatus(isModelReady ? 'Listening... speak naturally.' : 'Recording — model still loading, will transcribe soon.');
+      setWorkerStatus(
+        isModelReady ? 'Listening... speak naturally (offline AI).' : 'Recording — model still loading, will transcribe soon.'
+      );
 
       const intervalId = window.setInterval(() => {
         const samples = audioSamplesAccumulator.current;
@@ -356,9 +495,6 @@ export default function App() {
         const chunkId = ++chunkCounterRef.current;
 
         if (maxVal < 0.01) {
-          if (!hasFailedRef.current) {
-            setWorkerStatus('Silence detected — keep speaking.');
-          }
           return;
         }
 
@@ -392,7 +528,7 @@ export default function App() {
                 hasFailedRef.current = true;
                 setVoiceStatus('error');
                 setWorkerStatus(message.message);
-                stopRecording();
+                stopOfflineRecording();
                 resolve();
               }
             };
@@ -421,7 +557,7 @@ export default function App() {
     }
   }
 
-  function stopRecording() {
+  function stopOfflineRecording() {
     if (intervalIdRef.current) {
       window.clearInterval(intervalIdRef.current);
       intervalIdRef.current = null;
@@ -451,13 +587,25 @@ export default function App() {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // UNIFIED TOGGLE
+  // ─────────────────────────────────────────────────────────────────
+
   function toggleVoice() {
     if (voiceStatus === 'recording') {
-      stopRecording();
+      if (selectedEngine === 'fast') {
+        stopFastRecording();
+      } else {
+        stopOfflineRecording();
+      }
       return;
     }
 
-    void startRecording();
+    if (selectedEngine === 'fast') {
+      startFastRecording();
+    } else {
+      void startOfflineRecording();
+    }
   }
 
   const characterCount = noteText.length;
@@ -470,9 +618,11 @@ export default function App() {
         ? 'Downloading'
         : voiceStatus === 'error'
           ? 'Error'
-          : isModelReady
+          : selectedEngine === 'fast'
             ? '✓ Ready'
-            : 'Initializing';
+            : isModelReady
+              ? '✓ Ready'
+              : 'Initializing';
 
   const progressPercent =
     downloadProgress && downloadProgress.total > 0
@@ -482,11 +632,17 @@ export default function App() {
   const dictationButtonLabel =
     voiceStatus === 'recording'
       ? '■  Stop Dictation'
-      : isModelReady
+      : selectedEngine === 'fast'
         ? '🎙  Start Dictation'
-        : voiceStatus === 'loading'
-          ? '⏳  Downloading Model...'
-          : '🎙  Start Dictation';
+        : isModelReady
+          ? '🎙  Start Dictation'
+          : voiceStatus === 'loading'
+            ? '⏳  Downloading Model...'
+            : '🎙  Start Dictation';
+
+  const canStartDictation = selectedEngine === 'fast' || voiceStatus !== 'loading';
+
+  const activeEngineInfo = ENGINES.find((e) => e.id === selectedEngine);
 
   return (
     <div className="app-shell">
@@ -512,10 +668,36 @@ export default function App() {
           )}
 
           <small>
-            {isModelReady
-              ? 'AI model cached locally — works offline.'
-              : 'Free AI model downloads on first use (~40 MB, one-time).'}
+            {activeEngineInfo?.description || ''}
           </small>
+        </div>
+
+        <div className="device-card">
+          <label htmlFor="engine-select">🚀 Speech Engine</label>
+          <select
+            id="engine-select"
+            className="device-select"
+            value={selectedEngine}
+            onChange={(e) => {
+              const engine = e.target.value as Engine;
+              setSelectedEngine(engine);
+              window.localStorage.setItem(ENGINE_STORAGE_KEY, engine);
+              hasFailedRef.current = false;
+              setVoiceStatus('idle');
+              if (engine === 'fast') {
+                setWorkerStatus('Ready — using real-time speech engine.');
+              } else {
+                setWorkerStatus('Initializing offline AI engine...');
+              }
+            }}
+            disabled={voiceStatus === 'recording'}
+          >
+            {ENGINES.map((engine) => (
+              <option key={engine.id} value={engine.id}>
+                {engine.name}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="device-card">
@@ -539,25 +721,28 @@ export default function App() {
           </select>
         </div>
 
-        <div className="device-card">
-          <label htmlFor="model-select">🤖 Speech Recognition Model</label>
-          <select
-            id="model-select"
-            className="device-select"
-            value={selectedModelId}
-            onChange={(e) => {
-              setSelectedModelId(e.target.value);
-              window.localStorage.setItem(MODEL_STORAGE_KEY, e.target.value);
-            }}
-            disabled={voiceStatus === 'recording'}
-          >
-            {MODELS.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Only show model selector for offline engine */}
+        {selectedEngine === 'offline' && (
+          <div className="device-card">
+            <label htmlFor="model-select">🤖 Whisper Model Size</label>
+            <select
+              id="model-select"
+              className="device-select"
+              value={selectedModelId}
+              onChange={(e) => {
+                setSelectedModelId(e.target.value);
+                window.localStorage.setItem(MODEL_STORAGE_KEY, e.target.value);
+              }}
+              disabled={voiceStatus === 'recording'}
+            >
+              {MODELS.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="metrics-grid">
           <div>
@@ -573,8 +758,8 @@ export default function App() {
             <span>Recording</span>
           </div>
           <div>
-            <strong>{window.noteApi ? 'On' : 'Off'}</strong>
-            <span>Bridge</span>
+            <strong>{selectedEngine === 'fast' ? 'Live' : 'AI'}</strong>
+            <span>Engine</span>
           </div>
         </div>
 
@@ -582,7 +767,7 @@ export default function App() {
           <button
             className={`primary ${voiceStatus === 'recording' ? 'recording-active' : ''}`}
             onClick={toggleVoice}
-            disabled={voiceStatus === 'loading'}
+            disabled={!canStartDictation}
           >
             {dictationButtonLabel}
           </button>
@@ -596,8 +781,19 @@ export default function App() {
           <p>How it works</p>
           <ul>
             <li>Type normally or click the microphone button.</li>
-            <li>Speech is transcribed locally by a free AI model.</li>
-            <li>No internet needed after the first model download.</li>
+            {selectedEngine === 'fast' ? (
+              <>
+                <li>Speech is transcribed in real-time using your browser engine.</li>
+                <li>Words appear instantly as you speak.</li>
+                <li>Requires internet connection.</li>
+              </>
+            ) : (
+              <>
+                <li>Speech is transcribed locally by a free AI model.</li>
+                <li>No internet needed after the first model download.</li>
+                <li>Processing may take a few seconds per phrase.</li>
+              </>
+            )}
             <li>Native spellcheck underlines misspellings.</li>
           </ul>
         </div>
