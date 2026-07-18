@@ -20,6 +20,7 @@ interface NoteApi {
   openNote: () => Promise<OpenResult>;
   saveNote: (payload: SavePayload) => Promise<SaveResult>;
   appVersion: () => Promise<string>;
+  getGeminiKey: () => Promise<string>;
 }
 
 declare global {

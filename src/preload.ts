@@ -20,6 +20,7 @@ const noteApi = {
   openNote: (): Promise<OpenResult> => ipcRenderer.invoke('note:open'),
   saveNote: (payload: SavePayload): Promise<SaveResult> => ipcRenderer.invoke('note:save', payload),
   appVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
+  getGeminiKey: (): Promise<string> => ipcRenderer.invoke('app:getGeminiKey'),
 };
 
 contextBridge.exposeInMainWorld('noteApi', noteApi);

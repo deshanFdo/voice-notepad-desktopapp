@@ -15,8 +15,8 @@ const MODELS = [
 ];
 
 const ENGINES: { id: Engine; name: string; description: string }[] = [
-  { id: 'fast', name: '🌐 Online Mode (Instant)', description: 'Real-time transcription — words appear instantly as you speak. Requires internet.' },
-  { id: 'offline', name: '✈️ Offline Mode (Local AI)', description: 'Free local AI model. No internet needed. Slower but fully private.' },
+  { id: 'fast', name: '🌐 Online Mode (Gemini AI)', description: 'Fast transcription via Gemini API. Requires internet + API key in .env file.' },
+  { id: 'offline', name: '✈️ Offline Mode (Local Whisper)', description: 'Free local AI model. No internet needed. Slower but fully private.' },
 ];
 
 type WorkerMessage =
@@ -48,12 +48,50 @@ function joinTranscript(current: string, nextText: string) {
   return `${current}${separator}${trimmed}`;
 }
 
-// Check if Web Speech API is available
-function isSpeechRecognitionSupported(): boolean {
-  return !!(
-    (window as any).SpeechRecognition ||
-    (window as any).webkitSpeechRecognition
-  );
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
+function bufferToWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+
+  return buffer;
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      const base64 = result.substring(result.indexOf(',') + 1);
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 export default function App() {
@@ -73,8 +111,8 @@ export default function App() {
   const [selectedEngine, setSelectedEngine] = useState<Engine>(() => {
     const stored = window.localStorage.getItem(ENGINE_STORAGE_KEY) as Engine | null;
     if (stored === 'fast' || stored === 'offline') return stored;
-    // Default to fast if Web Speech API is available, otherwise offline
-    return isSpeechRecognitionSupported() ? 'fast' : 'offline';
+    // Default to online (Gemini API) — fast and accurate
+    return 'fast';
   });
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -90,8 +128,7 @@ export default function App() {
   const audioSamplesAccumulator = useRef<number[]>([]);
   const intervalIdRef = useRef<number | null>(null);
 
-  // Web Speech API ref
-  const recognitionRef = useRef<any>(null);
+  const initialNoteTextRef = useRef('');
 
   async function updateDevices() {
     try {
@@ -292,110 +329,179 @@ export default function App() {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // FAST ENGINE: Web Speech API (real-time, streaming)
+  // FAST ENGINE: Gemini API (sends each chunk independently)
   // ─────────────────────────────────────────────────────────────────
 
-  function startFastRecording() {
-    const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  async function startFastRecording() {
+    if (voiceStatus === 'recording') {
+      return;
+    }
 
-    if (!SpeechRecognitionCtor) {
-      setWorkerStatus('Web Speech API is not available. Switch to Offline AI engine.');
+    if (!navigator.mediaDevices?.getUserMedia) {
       setVoiceStatus('error');
-      hasFailedRef.current = true;
+      setWorkerStatus('Microphone access is not available in this environment.');
       return;
     }
 
     hasFailedRef.current = false;
+    audioSamplesAccumulator.current = [];
+    chunkCounterRef.current = 0;
 
-    const recognition = new SpeechRecognitionCtor();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-    recognition.maxAlternatives = 1;
-
-    // Track the last final result index so we don't re-process results
-    let lastFinalIndex = 0;
-
-    recognition.onresult = (event: any) => {
-      let finalText = '';
-
-      for (let i = lastFinalIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalText += event.results[i][0].transcript;
-          lastFinalIndex = i + 1;
-        }
-      }
-
-      if (finalText.trim()) {
-        setNoteText((current) => joinTranscript(current, finalText));
-        setSaveStatus('Transcript inserted.');
-        setWorkerStatus('Listening... speak naturally.');
-      }
-    };
-
-    recognition.onerror = (event: any) => {
-      console.error('[Fast Engine] SpeechRecognition error:', event.error);
-
-      // "aborted" fires when we stop - not a real error
-      if (event.error === 'aborted') {
+    try {
+      const apiKey = await window.noteApi.getGeminiKey();
+      if (!apiKey || apiKey.trim() === 'your-api-key-here' || apiKey.trim() === '') {
+        setWorkerStatus('No API key found. Add GOOGLE_API_KEY to your .env file and restart.');
+        setVoiceStatus('error');
+        hasFailedRef.current = true;
         return;
       }
 
-      if (event.error === 'not-allowed') {
-        setWorkerStatus('Microphone permission denied. Allow microphone access and try again.');
-        setVoiceStatus('error');
-        hasFailedRef.current = true;
-      } else if (event.error === 'network') {
-        setWorkerStatus('Network error. Check internet connection, or switch to Offline AI engine.');
-        setVoiceStatus('error');
-        hasFailedRef.current = true;
-      } else if (event.error === 'no-speech') {
-        // Chrome fires this after silence; just keep listening
-        setWorkerStatus('No speech detected — keep speaking.');
-      } else {
-        setWorkerStatus(`Speech error: ${event.error}. Try switching to Offline AI engine.`);
-        setVoiceStatus('error');
-        hasFailedRef.current = true;
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err) {
+        console.warn('Failed to get selected audio input, falling back to default mic:', err);
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
       }
-    };
 
-    recognition.onend = () => {
-      // Chrome/Electron stops recognition after silence or network glitch.
-      // Auto-restart if we're still supposed to be recording.
-      if (!hasFailedRef.current && voiceStatus === 'recording') {
-        try {
-          recognition.start();
-        } catch {
-          // Already started or other issue, ignore
+      streamRef.current = stream;
+
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioContext = new AudioContextClass({ sampleRate: 16000 });
+      audioContextRef.current = audioContext;
+      await audioContext.resume();
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        audioSamplesAccumulator.current.push(...inputData);
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      recordingStartRef.current = Date.now();
+      setRecordingSeconds(0);
+      setVoiceStatus('recording');
+      setWorkerStatus('Listening... speak naturally.');
+
+      // Send each 3-second chunk independently to Gemini for fast turnaround
+      const intervalId = window.setInterval(() => {
+        const samples = audioSamplesAccumulator.current;
+        if (samples.length === 0) return;
+
+        // Grab and clear the accumulator (only send new audio)
+        audioSamplesAccumulator.current = [];
+        const floatSamples = new Float32Array(samples);
+
+        // Skip silence
+        let maxVal = 0;
+        for (let i = 0; i < floatSamples.length; i++) {
+          const abs = Math.abs(floatSamples[i]);
+          if (abs > maxVal) maxVal = abs;
         }
-      }
-    };
+        if (maxVal < 0.01) return;
 
-    recognitionRef.current = recognition;
-    recordingStartRef.current = Date.now();
-    setRecordingSeconds(0);
-    setVoiceStatus('recording');
-    setWorkerStatus('Listening... speak naturally.');
+        const chunkId = ++chunkCounterRef.current;
 
-    try {
-      recognition.start();
-    } catch (err) {
-      console.error('[Fast Engine] Failed to start:', err);
-      setWorkerStatus('Failed to start speech recognition. Try Offline AI engine.');
-      setVoiceStatus('error');
+        // Fire-and-forget: don't queue, send in parallel for speed
+        (async () => {
+          if (hasFailedRef.current) return;
+          setWorkerStatus(`Transcribing chunk ${chunkId}...`);
+
+          try {
+            const wavBuffer = bufferToWav(floatSamples, 16000);
+            const wavBlob = new Blob([wavBuffer], { type: 'audio/wav' });
+            const base64Audio = await blobToBase64(wavBlob);
+
+            const response = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{
+                    parts: [
+                      { inlineData: { mimeType: 'audio/wav', data: base64Audio } },
+                      { text: 'Transcribe this audio clip verbatim. Output ONLY the spoken words, nothing else. If silence or noise only, output nothing.' },
+                    ],
+                  }],
+                }),
+              }
+            );
+
+            if (!response.ok) {
+              const errJson = await response.json().catch(() => ({}));
+              throw new Error(errJson?.error?.message || `HTTP ${response.status}`);
+            }
+
+            const result = await response.json();
+            let text = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            text = text.trim();
+
+            // Strip wrapping quotes Gemini sometimes adds
+            if (text.startsWith('"') && text.endsWith('"')) {
+              text = text.slice(1, -1).trim();
+            }
+
+            if (text && !hasFailedRef.current) {
+              setNoteText((current) => joinTranscript(current, text));
+              setSaveStatus('Transcript updated.');
+              setWorkerStatus('Listening... speak naturally.');
+            }
+          } catch (err) {
+            console.error(`[Gemini] Chunk ${chunkId} error:`, err);
+            if (!hasFailedRef.current) {
+              setWorkerStatus(`Gemini error: ${err instanceof Error ? err.message : err}`);
+              setVoiceStatus('error');
+              hasFailedRef.current = true;
+              stopFastRecording();
+            }
+          }
+        })();
+      }, 3000);
+
+      intervalIdRef.current = intervalId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to access microphone.';
       hasFailedRef.current = true;
+      setVoiceStatus('error');
+      setWorkerStatus(message);
+      setSaveStatus(message);
     }
   }
 
   function stopFastRecording() {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore stop errors
-      }
-      recognitionRef.current = null;
+    if (intervalIdRef.current) {
+      window.clearInterval(intervalIdRef.current);
+      intervalIdRef.current = null;
+    }
+
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
 
     recordingStartRef.current = null;

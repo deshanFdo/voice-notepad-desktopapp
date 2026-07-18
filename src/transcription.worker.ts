@@ -40,7 +40,7 @@ const DEFAULT_MODEL_ID = 'onnx-community/whisper-tiny.en';
 const TARGET_SAMPLE_RATE = 16000; // Whisper expects 16 kHz audio
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let transcriberPromise: Promise<any> | null = null;
+let transcriberInstance: any | null = null;
 let currentModelId = '';
 
 function postStatus(message: string) {
@@ -82,8 +82,8 @@ function resampleTo16kHz(samples: Float32Array, fromRate: number): Float32Array 
 async function getTranscriber(modelId: string) {
   const activeModelId = modelId || DEFAULT_MODEL_ID;
 
-  if (!transcriberPromise || currentModelId !== activeModelId) {
-    transcriberPromise = null;
+  if (!transcriberInstance || currentModelId !== activeModelId) {
+    transcriberInstance = null;
     currentModelId = activeModelId;
 
     // Resolve the path to the directory containing local WASM files (dist/renderer/)
@@ -95,8 +95,10 @@ async function getTranscriber(modelId: string) {
     }
     
     console.log('[Worker] Resolving WASM path to:', wasmPath);
-    env.backends.onnx.wasm.wasmPaths = wasmPath;
-    env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(4, navigator.hardwareConcurrency || 2));
+    if (env.backends.onnx.wasm) {
+      env.backends.onnx.wasm.wasmPaths = wasmPath;
+      env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(4, navigator.hardwareConcurrency || 2));
+    }
     
     // Enable caching for offline support
     env.useBrowserCache = true;
@@ -135,25 +137,25 @@ async function getTranscriber(modelId: string) {
     // 1. Try local WebGPU load (cached)
     try {
       console.log(`[Worker] Trying local WebGPU load for ${activeModelId}...`);
-      transcriberPromise = await tryLoad('webgpu', true);
+      transcriberInstance = await tryLoad('webgpu', true);
       postStatus('Model ready (GPU).');
       console.log('[Worker] WebGPU model loaded from cache.');
-      return transcriberPromise;
+      return transcriberInstance;
     } catch (gpuCacheErr) {
       console.warn('[Worker] Local WebGPU load failed, trying local WASM load...', gpuCacheErr);
       
       // 2. Try local WASM load (cached)
       try {
-        transcriberPromise = await tryLoad('wasm', true);
+        transcriberInstance = await tryLoad('wasm', true);
         postStatus('Model ready (CPU).');
         console.log('[Worker] WASM model loaded from cache.');
-        return transcriberPromise;
+        return transcriberInstance;
       } catch (wasmCacheErr) {
         console.warn('[Worker] Local WASM load failed, checking online network connection...', wasmCacheErr);
         
         // If offline and cache load failed, throw error
         if (!navigator.onLine) {
-          transcriberPromise = null;
+          transcriberInstance = null;
           const errorMsg = 'Model is not cached locally, and you are offline. Please connect to the internet to download the speech model.';
           postStatus(errorMsg);
           throw new Error(errorMsg);
@@ -163,7 +165,7 @@ async function getTranscriber(modelId: string) {
         postStatus(`Downloading free AI model (first time only)...`);
         try {
           console.log('[Worker] Trying to download model for WebGPU...');
-          transcriberPromise = await tryLoad('webgpu', false);
+          transcriberInstance = await tryLoad('webgpu', false);
           postStatus('Model ready (GPU).');
           console.log('[Worker] Model downloaded and loaded via WebGPU.');
         } catch (gpuDownloadErr) {
@@ -171,11 +173,11 @@ async function getTranscriber(modelId: string) {
           
           // 4. Fallback online download attempt via WASM
           try {
-            transcriberPromise = await tryLoad('wasm', false);
+            transcriberInstance = await tryLoad('wasm', false);
             postStatus('Model ready (CPU).');
             console.log('[Worker] Model downloaded and loaded via WASM.');
           } catch (wasmDownloadErr) {
-            transcriberPromise = null;
+            transcriberInstance = null;
             const message = wasmDownloadErr instanceof Error ? wasmDownloadErr.message : 'Download failed.';
             const errorMsg = `Failed to download model: ${message}`;
             postStatus(errorMsg);
@@ -186,7 +188,7 @@ async function getTranscriber(modelId: string) {
     }
   }
 
-  return transcriberPromise;
+  return transcriberInstance;
 }
 
 self.onmessage = async (event: MessageEvent<TranscribeRequest | LoadRequest>) => {
